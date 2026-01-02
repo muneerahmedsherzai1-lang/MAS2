@@ -1,4 +1,4 @@
-name: RDP Self-Hosted
+name: RDP Self-Hosted (Windows 11 Pro)
 
 on:
   workflow_dispatch:
@@ -6,44 +6,51 @@ on:
 jobs:
   secure-rdp:
     runs-on: self-hosted
-    timeout-minutes: 0  # Unlimited runtime
+    timeout-minutes: 0   # Unlimited runtime
 
     steps:
-      - name: Configure RDP & Firewall
+      - name: Enable RDP & Firewall
         shell: pwsh
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
+          Write-Host "Enabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
 
       - name: Create RDP User
         shell: pwsh
         run: |
-          $password = ConvertTo-SecureString "YourStrongPassword123!" -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $password -AccountNeverExpires -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-          "RDP_PASSWORD=YourStrongPassword123!" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $username = "rdpuser"
+          $password = ConvertTo-SecureString "${{ secrets.RDP_PASSWORD }}" -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $username -Password $password -AccountNeverExpires -PasswordNeverExpires -Description "GitHub RDP User"
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" -OutFile "$env:TEMP\tailscale.msi"
-          Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" -Wait
-          Remove-Item "$env:TEMP\tailscale.msi" -Force
-          tailscale up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=local-pc-runner
-          "TAILSCALE_IP=$(tailscale ip -4)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Remove-Item $msi -Force
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win11-runner
+          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
       - name: Verify RDP
         shell: pwsh
         run: |
-          Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -InformationLevel Detailed
+          Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
 
       - name: Keep RDP Alive
         shell: pwsh
         run: |
-          Write-Host "RDP IP: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          while ($true) { Start-Sleep -Seconds 300 }
+          Write-Host "=============================="
+          Write-Host " RDP READY"
+          Write-Host " IP: $env:TAILSCALE_IP"
+          Write-Host " USER: rdpuser"
+          Write-Host "=============================="
+          while ($true) { Start-Sleep 300 }

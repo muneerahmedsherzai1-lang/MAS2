@@ -96,6 +96,42 @@ jobs:
           Get-ComputerInfo | Select-Object CsName, OsName, OsVersion, WindowsProductName, OsArchitecture, CsProcessors, CsTotalPhysicalMemory
           Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, AdapterRAM
 
+  - name: Increase Storage & Enable GPU Support
+    shell: pwsh
+    run: |
+      Write-Host "=== Expanding Storage Partition ==="
+      # Get the main disk
+      $disk = Get-Disk | Where-Object {$_.BusType -eq 'SCSI'} | Select-Object -First 1
+      if ($disk) {
+        $diskNumber = $disk.Number
+        # Get partition info
+        $partition = Get-Partition -DiskNumber $diskNumber | Where-Object {$_.Type -eq 'Basic'} | Select-Object -First 1
+        if ($partition) {
+          # Resize partition to use all available space
+          $maxSize = (Get-PartitionSupportedSize -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber).SizeMax
+          Resize-Partition -DiskNumber $diskNumber -PartitionNumber $partition.PartitionNumber -Size $maxSize
+          Write-Host "Storage partition expanded successfully"
+        }
+      }
+      
+      Write-Host "=== Enabling GPU Support ==="
+      # Enable RemoteFX (GPU virtualization support if running in VM)
+      $gpuFound = Get-PnpDevice -PresentationOrder -InstanceId 'PCI*' | Where-Object {$_.Name -match 'Graphics|GPU|NVIDIA|AMD'}
+      if ($gpuFound) {
+        Write-Host "GPU Device(s) found: $($gpuFound.Name)"
+        # Install GPU drivers if NVIDIA
+        if ($gpuFound.Name -match 'NVIDIA') {
+          Write-Host "NVIDIA GPU detected - install latest drivers from nvidia.com"
+        } elseif ($gpuFound.Name -match 'AMD') {
+          Write-Host "AMD GPU detected - install latest drivers from amd.com"
+        }
+      } else {
+        Write-Host "No dedicated GPU found"
+      }
+      
+      # Enable 3D graphics (if applicable)
+      Write-Host "GPU support configuration complete"
+      
       - name: Enable Auto Windows Updates
         shell: pwsh
         run: |

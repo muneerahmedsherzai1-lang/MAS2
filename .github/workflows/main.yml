@@ -1,100 +1,79 @@
-name: Ultimate RDP Self-Hosted Windows 11 Pro
+# ==============================
+# Ultimate Free Worldwide RDP Setup
+# ==============================
 
-on:
-  workflow_dispatch:
+# --- Step 1: Install Tailscale ---
+Write-Host "=== Installing Tailscale ==="
+$msi = "$env:TEMP\tailscale.msi"
+Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
+Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+Remove-Item $msi -Force
 
-jobs:
-  secure-rdp:
-    runs-on: self-hosted
-    timeout-minutes: 0   # Unlimited runtime
+# Replace YOUR_AUTH_KEY with your Tailscale auth key
+$authKey = "YOUR_AUTH_KEY"
+& "C:\Program Files\Tailscale\tailscale.exe" up --authkey $authKey --hostname "win11-host" --accept-routes
 
-    steps:
-      - name: Enable RDP & Harden Firewall
-        shell: pwsh
-        run: |
-          Write-Host "=== Enabling RDP & configuring firewall ==="
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          # Disable NLA (for legacy clients)
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
-          # Enable Remote Desktop firewall rules
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Restart-Service TermService -Force
+# Get Tailscale IP
+$tsIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+Write-Host "Tailscale IP: $tsIP"
 
-      - name: Create Persistent RDP User
-        shell: pwsh
-        run: |
-          $username = "MAS"
-          $password = ConvertTo-SecureString "dont" -AsPlainText -Force
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $username -Password $password -AccountNeverExpires -PasswordNeverExpires -Description "GitHub RDP User"
-          }
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          Write-Host "RDP user ensured: $username"
+# --- Step 2: Enable RDP ---
+Write-Host "=== Enabling RDP ==="
+Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+# Optional: Disable NLA for older clients
+Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
+# Enable firewall rules
+Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-      - name: Install & Update Tailscale
-        shell: pwsh
-        run: |
-          Write-Host "=== Installing Tailscale ==="
-          $msi = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-          Remove-Item $msi -Force
-          # Up Tailscale with auth key
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win11-runner --accept-routes
-          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
-          Write-Host "Tailscale IP: $ip"
+# --- Step 3: Create RDP User ---
+Write-Host "=== Creating RDP User ==="
+$username = "MAS"
+$password = ConvertTo-SecureString "YourStrongPassword123!" -AsPlainText -Force
+if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+    New-LocalUser -Name $username -Password $password -AccountNeverExpires -PasswordNeverExpires -Description "RDP User"
+}
+Add-LocalGroupMember -Group "Administrators" -Member $username
+Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+Write-Host "RDP user ensured: $username"
 
-      - name: Lock RDP to Tailscale Only
-        shell: pwsh
-        run: |
-          $ip = $env:TAILSCALE_IP
-          if ($ip) {
-            Write-Host "Restricting RDP firewall to Tailscale IP $ip"
-            Disable-NetFirewallRule -DisplayGroup "Remote Desktop"
-            New-NetFirewallRule -DisplayName "RDP-Tailscale" -Direction Inbound -LocalPort 3389 -Protocol TCP -Action Allow -RemoteAddress $ip
-          }
+# --- Step 4: Lock RDP to Tailscale Only ---
+Write-Host "=== Locking RDP firewall to Tailscale IP ==="
+if ($tsIP) {
+    Disable-NetFirewallRule -DisplayGroup "Remote Desktop"
+    New-NetFirewallRule -DisplayName "RDP-Tailscale" `
+        -Direction Inbound `
+        -LocalPort 3389 `
+        -Protocol TCP `
+        -Action Allow `
+        -RemoteAddress $tsIP
+    Write-Host "RDP firewall restricted to: $tsIP"
+}
 
-      - name: Verify RDP & System Health
-        shell: pwsh
-        run: |
-          Write-Host "=== Verifying RDP connectivity and system health ==="
-          Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          Write-Host "=== System Info ==="
-          Get-ComputerInfo | Select-Object CsName, OsName, OsVersion, WindowsProductName, OsArchitecture, CsProcessors, CsTotalPhysicalMemory
-          Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, AdapterRAM
+# --- Step 5: Enable Auto Windows Updates ---
+Write-Host "=== Enabling automatic Windows Updates ==="
+Set-Service -Name wuauserv -StartupType Automatic
+Start-Service wuauserv
 
-      - name: Enable Auto Windows Updates
-        shell: pwsh
-        run: |
-          Write-Host "=== Enabling automatic Windows Updates ==="
-          Set-Service -Name wuauserv -StartupType Automatic
-          Start-Service wuauserv
+# --- Step 6: Optional Monitor Loop for RDP & Tailscale ---
+Write-Host "=== Starting monitor loop for RDP & Tailscale ==="
+Start-Job -ScriptBlock {
+    while ($true) {
+        # Check RDP service
+        if ((Get-Service TermService).Status -ne "Running") {
+            Start-Service TermService
+        }
 
-      - name: Monitor & Auto-Restart RDP / Tailscale
-        shell: pwsh
-        run: |
-          Write-Host "=== Starting persistent monitor loop ==="
-          while ($true) {
-            # Check RDP service
-            $term = Get-Service TermService
-            if ($term.Status -ne "Running") {
-              Write-Host "RDP service stopped. Restarting..."
-              Start-Service TermService
-            }
+        # Check Tailscale connection
+        $tsStatus = & "C:\Program Files\Tailscale\tailscale.exe" status
+        if ($tsStatus -notmatch "100.") {
+            & "C:\Program Files\Tailscale\tailscale.exe" down
+            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey $using:authKey --hostname "win11-host" --accept-routes
+        }
 
-            # Check Tailscale status
-            $ts = & "C:\Program Files\Tailscale\tailscale.exe" status
-            if ($ts -notmatch "100.100") {
-              Write-Host "Tailscale disconnected. Restarting Tailscale..."
-              & "C:\Program Files\Tailscale\tailscale.exe" down
-              & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win11-runner --accept-routes
-            }
+        Start-Sleep -Seconds 300
+    }
+}
+Write-Host "Monitor loop started. RDP and Tailscale will auto-reconnect if needed."
 
-            # Log heartbeat
-            Write-Host "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - RDP & Tailscale OK"
-
-            Start-Sleep -Seconds 300
-          }
+Write-Host "✅ Setup complete! Connect via Tailscale IP or MagicDNS hostname."
+Write-Host "Example: mstsc /v:$tsIP"

@@ -5,8 +5,9 @@ on:
 
 jobs:
   secure-rdp:
-    runs-on: self-hosted
-    timeout-minutes: 0  # Unlimited runtime
+    runs-on: [self-hosted, windows-11-pro]
+      timeout-minutes: 0  # Unlimited runtime
+    
 
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}

@@ -24,6 +24,27 @@ jobs:
           # Enable Remote Desktop firewall rules
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Restart-Service TermService -Force
+          
+  - name: Set Static IP Address
+    shell: powershell
+    run: |
+      # Get the primary network adapter
+      $adapter = Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1
+      if ($adapter) {
+        $adapterName = $adapter.Name
+        # Set static IP (configure as needed for your network)
+        $ipAddress = '192.168.1.100'
+        $prefixLength = 24
+        $gateway = '192.168.1.1'
+        $dns = @('8.8.8.8', '8.8.4.4')
+        
+        # Remove DHCP and set static IP
+        Remove-NetIPAddress -InterfaceAlias $adapterName -Confirm:$false -ErrorAction SilentlyContinue
+        New-NetIPAddress -InterfaceAlias $adapterName -IPAddress $ipAddress -PrefixLength $prefixLength -DefaultGateway $gateway
+        Set-DnsClientServerAddress -InterfaceAlias $adapterName -ServerAddresses $dns
+        
+        Write-Host "Static IP set to $ipAddress"
+      }
 
       - name: Create Persistent RDP User
         shell: pwsh

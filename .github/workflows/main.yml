@@ -1,4 +1,4 @@
-name: Windows 11 RDP + Tailscale + Disk Auto Expand
+name: Windows 11 RDP + Tailscale + Disk Check
 
 on:
   workflow_dispatch:
@@ -13,87 +13,65 @@ jobs:
 
     steps:
 
-      - name: Show Current Disk Space
+      - name: Show Disk Space
         shell: pwsh
         run: |
-          Write-Host "===== CURRENT DISK SPACE ====="
-          Get-PSDrive -PSProvider FileSystem
+          Write-Host "===== DISK SPACE ====="
+          Get-Volume | Select DriveLetter, FileSystemLabel, SizeRemaining, Size | Format-Table
 
-      - name: Display System & Graphics Information
+      - name: Show System Information
         shell: pwsh
         run: |
-          Write-Host "===== SYSTEM INFORMATION ====="
-          Get-ComputerInfo -Property CsSystemType, CsManufacturer, WindowsProductName, WindowsVersion | Format-List
+          Write-Host "===== SYSTEM INFO ====="
+          Get-CimInstance Win32_ComputerSystem | 
+            Select Manufacturer, Model, TotalPhysicalMemory | Format-List
 
-          Write-Host ""
-          Write-Host "===== GRAPHICS & VIDEO CARDS ====="
-          Get-WmiObject -Class Win32_VideoController |
-            Select-Object Name, VideoProcessor, DriverVersion |
-            Format-Table
+          Write-Host "===== CPU ====="
+          Get-CimInstance Win32_Processor | 
+            Select Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
 
-          Write-Host ""
-          Write-Host "===== CPU INFORMATION ====="
-          Get-WmiObject -Class Win32_Processor |
-            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed |
-            Format-Table
+          Write-Host "===== GPU ====="
+          Get-CimInstance Win32_VideoController | 
+            Select Name, DriverVersion | Format-Table
 
-          Write-Host ""
-          Write-Host "===== MEMORY INFORMATION ====="
-          $mem = (Get-ComputerInfo).CsTotalPhysicalMemory
-          Write-Host ("Total RAM: {0} GB" -f [math]::Round($mem / 1GB, 2))
-
-      - name: Expand System Drive If Unallocated Space Exists
+      - name: Check For Unallocated Space (Safe)
         shell: pwsh
         run: |
-          Write-Host "===== CHECKING SYSTEM DRIVE FOR EXPANSION ====="
+          Write-Host "===== DISK EXPANSION CHECK ====="
 
-          $disk = Get-Disk | Where-Object { $_.IsSystem -eq $true } | Select-Object -First 1
-          if (!$disk) {
-            Write-Host "System disk not found"
-            exit 0
-          }
-
-          $partition = Get-Partition -DiskNumber $disk.Number |
-                       Where-Object { $_.Type -ne 'Reserved' } |
+          $disk = Get-Disk | Where-Object { $_.Number -eq 0 }
+          $partition = Get-Partition -DiskNumber 0 | 
+                       Where-Object DriveLetter -ne $null | 
                        Select-Object -First 1
 
-          if (!$partition) {
-            Write-Host "No system partition found"
+          if (!$disk -or !$partition) {
+            Write-Host "Disk or partition not found. Skipping."
             exit 0
           }
 
-          $sizeInfo = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
+          $sizeInfo = Get-PartitionSupportedSize `
+            -DiskNumber 0 `
+            -PartitionNumber $partition.PartitionNumber
 
           if ($sizeInfo.SizeMax -gt $partition.Size) {
-            Resize-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Size $sizeInfo.SizeMax
-            Write-Host "System drive expanded successfully"
-          } else {
-            Write-Host "No unallocated space available"
+              Resize-Partition `
+                -DiskNumber 0 `
+                -PartitionNumber $partition.PartitionNumber `
+                -Size $sizeInfo.SizeMax
+              Write-Host "Drive expanded successfully."
           }
-
-      - name: Initialize Any Extra RAW Disk
-        shell: pwsh
-        run: |
-          Write-Host "===== CHECKING FOR EXTRA RAW DISKS ====="
-
-          $rawDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' } | Select-Object -First 1
-
-          if ($rawDisk) {
-            Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -PassThru |
-              New-Partition -UseMaximumSize -AssignDriveLetter |
-              Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraStorage" -Confirm:$false
-
-            Write-Host "Extra disk initialized and formatted"
-          } else {
-            Write-Host "No RAW disks found"
+          else {
+              Write-Host "No unallocated space available."
           }
 
       - name: Enable RDP
         shell: pwsh
         run: |
           Write-Host "===== ENABLING RDP ====="
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name fDenyTSConnections -Value 0
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Restart-Service TermService -Force
 
       - name: Create RDP User
@@ -102,57 +80,43 @@ jobs:
           $username = "MAS"
           $password = ConvertTo-SecureString "YourStrongPassword123!" -AsPlainText -Force
 
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $username -Password $password -AccountNeverExpires -PasswordNeverExpires
+          if (!(Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $username -Password $password -PasswordNeverExpires
           }
 
           Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
 
-          Write-Host "RDP User Ready: $username"
+          Write-Host "RDP User Ready: MAS"
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          if (-not (Test-Path "C:\Program Files\Tailscale\tailscale.exe")) {
+          if (!(Test-Path "C:\Program Files\Tailscale\tailscale.exe")) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
             $msi = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
+            Invoke-WebRequest $url -OutFile $msi
             Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
           }
 
       - name: Connect Tailscale
         shell: pwsh
         run: |
-          Start-Sleep -Seconds 3
           & "C:\Program Files\Tailscale\tailscale.exe" up `
             --authkey=$env:TAILSCALE_AUTH_KEY `
             --hostname=win11-rdp `
             --accept-routes
 
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append -InputObject "TAILSCALE_IP=$ip"
+          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IP: $ip"
 
       - name: Restrict RDP to Tailscale IP
         shell: pwsh
         run: |
-          $ip = $env:TAILSCALE_IP
-          if ($ip) {
-            Get-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+          if ($env:TAILSCALE_IP) {
+            Remove-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue
             New-NetFirewallRule -DisplayName "RDP-Tailscale" `
               -Direction Inbound -Protocol TCP -LocalPort 3389 `
-              -RemoteAddress $ip -Action Allow
-            Write-Host "RDP allowed only from $ip"
-          }
-
-      - name: Show Connection Info
-        shell: pwsh
-        run: |
-          Write-Host ""
-          Write-Host "======================================="
-          Write-Host "   ✅ RDP READY"
-          Write-Host "---------------------------------------"
-          Write-Host "IP Address : $env:TAILSCALE_IP"
-          Write-Host "Username   : MAS"
-          Write-Host "Password   : YourStrongPassword123!"
-          Write-Host "======================================="
+              -RemoteAddress $env:TAILSCALE_IP -Action Allo_

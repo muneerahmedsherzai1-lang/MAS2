@@ -6,8 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: self-hosted
-    timeout-minutes: 3600
-
+  timeout-minutes: 7200
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
@@ -18,6 +17,28 @@ jobs:
         run: |
           Write-Host "===== CURRENT DISK SPACE ====="
           Get-PSDrive -PSProvider FileSystem
+            - name: Display System & Graphics Information
+    shell: pwsh
+    run: |
+      Write-Host "===== SYSTEM INFORMATION ====="
+      Get-ComputerInfo -Property "CsSystemType", "CsManufacturer", "WindowsProductName", "WindowsVersion" |
+      Format-List
+      Write-Host ""
+      Write-Host "===== GRAPHICS & VIDEO CARDS ====="
+      Get-WmiObject -Class Win32_VideoController |
+      Select-Object Name, VideoProcessor, SystemName, DriverVersion |
+      Format-Table
+      Write-Host ""
+      Write-Host "===== CPU INFORMATION ====="
+      Get-WmiObject -Class Win32_Processor |
+      Select-Object Name, Cores, Threads, MaxClockSpeed |
+      Format-Table
+      Write-Host ""
+      Write-Host "===== MEMORY INFORMATION ====="
+      $memInfo = Get-ComputerInfo -Property CsTotalPhysicalMemory
+      $totalMem = [math]::Round($memInfo.CsTotalPhysicalMemory / 1GB, 2)
+      Write-Host "Total Memory: $totalMem GB"
+      
 
       - name: Expand System Drive If Unallocated Space Exists
         shell: pwsh

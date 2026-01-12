@@ -47,15 +47,20 @@ jobs:
         run: |
           Write-Host "===== CHECKING SYSTEM DRIVE FOR EXPANSION ====="
 
-          $disk = Get-Disk | Where-Object IsSystem -eq $true | Select-Object -First 1
+          $disk = Get-Disk | Where-Object { $_.IsSystem -eq $true } | Select-Object -First 1
           if (!$disk) {
             Write-Host "System disk not found"
             exit 0
           }
 
           $partition = Get-Partition -DiskNumber $disk.Number |
-                       Where-Object Type -ne 'Reserved' |
+                       Where-Object { $_.Type -ne 'Reserved' } |
                        Select-Object -First 1
+
+          if (!$partition) {
+            Write-Host "No system partition found"
+            exit 0
+          }
 
           $sizeInfo = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
 
@@ -71,7 +76,7 @@ jobs:
         run: |
           Write-Host "===== CHECKING FOR EXTRA RAW DISKS ====="
 
-          $rawDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Select-Object -First 1
+          $rawDisk = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' } | Select-Object -First 1
 
           if ($rawDisk) {
             Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -PassThru |
@@ -118,6 +123,7 @@ jobs:
       - name: Connect Tailscale
         shell: pwsh
         run: |
+          Start-Sleep -Seconds 3
           & "C:\Program Files\Tailscale\tailscale.exe" up `
             --authkey=$env:TAILSCALE_AUTH_KEY `
             --hostname=win11-rdp `

@@ -1,4 +1,4 @@
-name: Windows 11 RDP + Tailscale + Disk Check
+name: Windows 11 RDP + Tailscale + Auto Disk Expand
 
 on:
   workflow_dispatch:
@@ -13,64 +13,63 @@ jobs:
 
     steps:
 
-      - name: Show Disk Space
+      - name: Show Current Disk Space
         shell: pwsh
         run: |
-          Write-Host "===== DISK SPACE ====="
+          Write-Host "===== CURRENT DISK SPACE ====="
           Get-Volume | Select DriveLetter, FileSystemLabel, SizeRemaining, Size | Format-Table
 
-      - name: Show System Information
+      - name: Show System & Hardware Information
         shell: pwsh
         run: |
           Write-Host "===== SYSTEM INFO ====="
-          Get-CimInstance Win32_ComputerSystem | 
-            Select Manufacturer, Model, TotalPhysicalMemory | Format-List
+          Get-CimInstance Win32_ComputerSystem | Select Manufacturer, Model, TotalPhysicalMemory | Format-List
 
           Write-Host "===== CPU ====="
-          Get-CimInstance Win32_Processor | 
-            Select Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
+          Get-CimInstance Win32_Processor | Select Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
 
           Write-Host "===== GPU ====="
-          Get-CimInstance Win32_VideoController | 
-            Select Name, DriverVersion | Format-Table
+          Get-CimInstance Win32_VideoController | Select Name, DriverVersion | Format-Table
 
-      - name: Check For Unallocated Space (Safe)
+          Write-Host "===== MEMORY ====="
+          $memGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
+          Write-Host "Total RAM: $memGB GB"
+
+      - name: Expand All Disks With Unallocated Space
         shell: pwsh
         run: |
-          Write-Host "===== DISK EXPANSION CHECK ====="
-
-          $disk = Get-Disk | Where-Object { $_.Number -eq 0 }
-          $partition = Get-Partition -DiskNumber 0 | 
-                       Where-Object DriveLetter -ne $null | 
-                       Select-Object -First 1
-
-          if (!$disk -or !$partition) {
-            Write-Host "Disk or partition not found. Skipping."
-            exit 0
+          Write-Host "===== EXPANDING DISKS WITH UNALLOCATED SPACE ====="
+          $disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Online' -and $_.PartitionStyle -ne 'RAW' }
+          foreach ($disk in $disks) {
+              $partitions = Get-Partition -DiskNumber $disk.Number
+              foreach ($partition in $partitions) {
+                  $sizeInfo = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
+                  if ($sizeInfo.SizeMax -gt $partition.Size) {
+                      Resize-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Size $sizeInfo.SizeMax
+                      Write-Host "✅ Expanded partition $($partition.DriveLetter) on disk $($disk.Number)"
+                  } else {
+                      Write-Host "No unallocated space to expand on partition $($partition.DriveLetter)"
+                  }
+              }
           }
 
-          $sizeInfo = Get-PartitionSupportedSize `
-            -DiskNumber 0 `
-            -PartitionNumber $partition.PartitionNumber
-
-          if ($sizeInfo.SizeMax -gt $partition.Size) {
-              Resize-Partition `
-                -DiskNumber 0 `
-                -PartitionNumber $partition.PartitionNumber `
-                -Size $sizeInfo.SizeMax
-              Write-Host "Drive expanded successfully."
-          }
-          else {
-              Write-Host "No unallocated space available."
+      - name: Initialize Any RAW Disk
+        shell: pwsh
+        run: |
+          Write-Host "===== INITIALIZING RAW DISKS ====="
+          $rawDisks = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.OperationalStatus -eq 'Online' }
+          foreach ($disk in $rawDisks) {
+              Initialize-Disk -Number $disk.Number -PartitionStyle GPT -PassThru |
+                  New-Partition -UseMaximumSize -AssignDriveLetter |
+                  Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraStorage" -Confirm:$false
+              Write-Host "✅ Initialized and formatted disk $($disk.Number)"
           }
 
       - name: Enable RDP
         shell: pwsh
         run: |
           Write-Host "===== ENABLING RDP ====="
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name fDenyTSConnections -Value 0
-
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Restart-Service TermService -Force
 
@@ -93,11 +92,10 @@ jobs:
         shell: pwsh
         run: |
           if (!(Test-Path "C:\Program Files\Tailscale\tailscale.exe")) {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-            $msi = "$env:TEMP\tailscale.msi"
-            Invoke-WebRequest $url -OutFile $msi
-            Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              $msi = "$env:TEMP\tailscale.msi"
+              Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
+              Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
           }
 
       - name: Connect Tailscale
@@ -119,4 +117,18 @@ jobs:
             Remove-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue
             New-NetFirewallRule -DisplayName "RDP-Tailscale" `
               -Direction Inbound -Protocol TCP -LocalPort 3389 `
-              -RemoteAddress $env:TAILSCALE_IP -Action Allo_
+              -RemoteAddress $env:TAILSCALE_IP -Action Allow
+            Write-Host "Firewall locked to Tailscale IP"
+          }
+
+      - name: Show Connection Info
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "==============================="
+          Write-Host " ✅ WINDOWS 11 RDP READY"
+          Write-Host "-------------------------------"
+          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
+          Write-Host "Username    : MAS"
+          Write-Host "Password    : YourStrongPassword123!"
+          Write-Host "==============================="

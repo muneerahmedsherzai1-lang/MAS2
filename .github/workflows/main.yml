@@ -6,7 +6,8 @@ on:
 jobs:
   secure-rdp:
     runs-on: self-hosted
-  timeout-minutes: 7200
+    timeout-minutes: 7200
+
     env:
       TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
 
@@ -17,66 +18,69 @@ jobs:
         run: |
           Write-Host "===== CURRENT DISK SPACE ====="
           Get-PSDrive -PSProvider FileSystem
-            - name: Display System & Graphics Information
-    shell: pwsh
-    run: |
-      Write-Host "===== SYSTEM INFORMATION ====="
-      Get-ComputerInfo -Property "CsSystemType", "CsManufacturer", "WindowsProductName", "WindowsVersion" |
-      Format-List
-      Write-Host ""
-      Write-Host "===== GRAPHICS & VIDEO CARDS ====="
-      Get-WmiObject -Class Win32_VideoController |
-      Select-Object Name, VideoProcessor, SystemName, DriverVersion |
-      Format-Table
-      Write-Host ""
-      Write-Host "===== CPU INFORMATION ====="
-      Get-WmiObject -Class Win32_Processor |
-      Select-Object Name, Cores, Threads, MaxClockSpeed |
-      Format-Table
-      Write-Host ""
-      Write-Host "===== MEMORY INFORMATION ====="
-      $memInfo = Get-ComputerInfo -Property CsTotalPhysicalMemory
-      $totalMem = [math]::Round($memInfo.CsTotalPhysicalMemory / 1GB, 2)
-      Write-Host "Total Memory: $totalMem GB"
-      
+
+      - name: Display System & Graphics Information
+        shell: pwsh
+        run: |
+          Write-Host "===== SYSTEM INFORMATION ====="
+          Get-ComputerInfo -Property CsSystemType, CsManufacturer, WindowsProductName, WindowsVersion | Format-List
+
+          Write-Host ""
+          Write-Host "===== GRAPHICS & VIDEO CARDS ====="
+          Get-WmiObject -Class Win32_VideoController |
+            Select-Object Name, VideoProcessor, DriverVersion |
+            Format-Table
+
+          Write-Host ""
+          Write-Host "===== CPU INFORMATION ====="
+          Get-WmiObject -Class Win32_Processor |
+            Select-Object Name, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed |
+            Format-Table
+
+          Write-Host ""
+          Write-Host "===== MEMORY INFORMATION ====="
+          $mem = (Get-ComputerInfo).CsTotalPhysicalMemory
+          Write-Host ("Total RAM: {0} GB" -f [math]::Round($mem / 1GB, 2))
 
       - name: Expand System Drive If Unallocated Space Exists
         shell: pwsh
         run: |
           Write-Host "===== CHECKING SYSTEM DRIVE FOR EXPANSION ====="
 
-          $disk = Get-Disk | Where-Object { $_.IsSystem -eq $true } | Select-Object -First 1
+          $disk = Get-Disk | Where-Object IsSystem -eq $true | Select-Object -First 1
           if (!$disk) {
             Write-Host "System disk not found"
             exit 0
           }
 
-          $partition = Get-Partition -DiskNumber $disk.Number | 
-                       Where-Object { $_.Type -ne 'Reserved' } | 
+          $partition = Get-Partition -DiskNumber $disk.Number |
+                       Where-Object Type -ne 'Reserved' |
                        Select-Object -First 1
 
           $sizeInfo = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
 
           if ($sizeInfo.SizeMax -gt $partition.Size) {
-              Resize-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Size $sizeInfo.SizeMax
-              Write-Host "System drive expanded successfully"
+            Resize-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Size $sizeInfo.SizeMax
+            Write-Host "System drive expanded successfully"
           } else {
-              Write-Host "No unallocated space available"
+            Write-Host "No unallocated space available"
           }
 
       - name: Initialize Any Extra RAW Disk
         shell: pwsh
         run: |
           Write-Host "===== CHECKING FOR EXTRA RAW DISKS ====="
+
           $rawDisk = Get-Disk | Where-Object PartitionStyle -eq 'RAW' | Select-Object -First 1
 
           if ($rawDisk) {
-              Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -PassThru |
-                New-Partition -UseMaximumSize -AssignDriveLetter |
-                Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraStorage" -Confirm:$false
-              Write-Host "Extra disk initialized and formatted"
+            Initialize-Disk -Number $rawDisk.Number -PartitionStyle GPT -PassThru |
+              New-Partition -UseMaximumSize -AssignDriveLetter |
+              Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraStorage" -Confirm:$false
+
+            Write-Host "Extra disk initialized and formatted"
           } else {
-              Write-Host "No RAW disks found"
+            Write-Host "No RAW disks found"
           }
 
       - name: Enable RDP
@@ -121,7 +125,6 @@ jobs:
 
           $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
           Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append -InputObject "TAILSCALE_IP=$ip"
-
           Write-Host "Tailscale IP: $ip"
 
       - name: Restrict RDP to Tailscale IP

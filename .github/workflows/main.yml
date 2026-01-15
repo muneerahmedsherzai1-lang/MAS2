@@ -1,134 +1,69 @@
-name: Windows 11 RDP + Tailscale + Auto Disk Expand
+name: RDP
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    runs-on: self-hosted
-    timeout-minutes: 7200
-
-    env:
-      TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+    runs-on: [self-hosted, windows]
+    timeout-minutes: 0   # unlimited on self-hosted
 
     steps:
-
-      - name: Show Current Disk Space
+      - name: Enable RDP and Firewall
         shell: pwsh
         run: |
-          Write-Host "===== CURRENT DISK SPACE ====="
-          Get-Volume | Select DriveLetter, FileSystemLabel, SizeRemaining, Size | Format-Table
+          Write-Host "Enabling Remote Desktop..."
 
-      - name: Show System & Hardware Information
-        shell: pwsh
-        run: |
-          Write-Host "===== SYSTEM INFO ====="
-          Get-CimInstance Win32_ComputerSystem | Select Manufacturer, Model, TotalPhysicalMemory | Format-List
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" -Value 0
 
-          Write-Host "===== CPU ====="
-          Get-CimInstance Win32_Processor | Select Name, NumberOfCores, NumberOfLogicalProcessors | Format-Table
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
 
-          Write-Host "===== GPU ====="
-          Get-CimInstance Win32_VideoController | Select Name, DriverVersion | Format-Table
-
-          Write-Host "===== MEMORY ====="
-          $memGB = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 2)
-          Write-Host "Total RAM: $memGB GB"
-
-      - name: Expand All Disks With Unallocated Space
-        shell: pwsh
-        run: |
-          Write-Host "===== EXPANDING DISKS WITH UNALLOCATED SPACE ====="
-          $disks = Get-Disk | Where-Object { $_.OperationalStatus -eq 'Online' -and $_.PartitionStyle -ne 'RAW' }
-          foreach ($disk in $disks) {
-              $partitions = Get-Partition -DiskNumber $disk.Number
-              foreach ($partition in $partitions) {
-                  $sizeInfo = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber
-                  if ($sizeInfo.SizeMax -gt $partition.Size) {
-                      Resize-Partition -DiskNumber $disk.Number -PartitionNumber $partition.PartitionNumber -Size $sizeInfo.SizeMax
-                      Write-Host "✅ Expanded partition $($partition.DriveLetter) on disk $($disk.Number)"
-                  } else {
-                      Write-Host "No unallocated space to expand on partition $($partition.DriveLetter)"
-                  }
-              }
-          }
-
-      - name: Initialize Any RAW Disk
-        shell: pwsh
-        run: |
-          Write-Host "===== INITIALIZING RAW DISKS ====="
-          $rawDisks = Get-Disk | Where-Object { $_.PartitionStyle -eq 'RAW' -and $_.OperationalStatus -eq 'Online' }
-          foreach ($disk in $rawDisks) {
-              Initialize-Disk -Number $disk.Number -PartitionStyle GPT -PassThru |
-                  New-Partition -UseMaximumSize -AssignDriveLetter |
-                  Format-Volume -FileSystem NTFS -NewFileSystemLabel "ExtraStorage" -Confirm:$false
-              Write-Host "✅ Initialized and formatted disk $($disk.Number)"
-          }
-
-      - name: Enable RDP
-        shell: pwsh
-        run: |
-          Write-Host "===== ENABLING RDP ====="
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
           Restart-Service TermService -Force
+
+          Write-Host "RDP Enabled."
 
       - name: Create RDP User
         shell: pwsh
         run: |
-          $username = "MAS"
-          $password = ConvertTo-SecureString "YourStrongPassword123!" -AsPlainText -Force
+          $password = -join ((33..126) | Get-Random -Count 16 | ForEach-Object {[char]$_})
+          $secure = ConvertTo-SecureString $password -AsPlainText -Force
 
-          if (!(Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name $username -Password $password -PasswordNeverExpires
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name "RDP" -Password $secure
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           }
 
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-
-          Write-Host "RDP User Ready: MAS"
+          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         shell: pwsh
         run: |
-          if (!(Test-Path "C:\Program Files\Tailscale\tailscale.exe")) {
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              $msi = "$env:TEMP\tailscale.msi"
-              Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile $msi
-              Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
-          }
+          $url="https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $out="$env:TEMP\tailscale.msi"
+          Invoke-WebRequest $url -OutFile $out
+          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet /norestart" -Wait
 
       - name: Connect Tailscale
         shell: pwsh
         run: |
-          & "C:\Program Files\Tailscale\tailscale.exe" up `
-            --authkey=$env:TAILSCALE_AUTH_KEY `
-            --hostname=win11-rdp `
-            --accept-routes
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+            --hostname=rdp-$env:COMPUTERNAME
 
-          $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          "TAILSCALE_IP=$ip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Tailscale IP: $ip"
-
-      - name: Restrict RDP to Tailscale IP
-        shell: pwsh
-        run: |
-          if ($env:TAILSCALE_IP) {
-            Remove-NetFirewallRule -DisplayName "RDP-Tailscale" -ErrorAction SilentlyContinue
-            New-NetFirewallRule -DisplayName "RDP-Tailscale" `
-              -Direction Inbound -Protocol TCP -LocalPort 3389 `
-              -RemoteAddress $env:TAILSCALE_IP -Action Allow
-            Write-Host "Firewall locked to Tailscale IP"
-          }
+          Start-Sleep 5
+          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          echo "TS_IP=$ip" >> $env:GITHUB_ENV
 
       - name: Show Connection Info
         shell: pwsh
         run: |
           Write-Host ""
-          Write-Host "==============================="
-          Write-Host " ✅ WINDOWS 11 RDP READY"
-          Write-Host "-------------------------------"
-          Write-Host "Tailscale IP : $env:TAILSCALE_IP"
-          Write-Host "Username    : MAS"
-          Write-Host "Password    : YourStrongPassword123!"
-          Write-Host "==============================="
+          Write-Host "=============================="
+          Write-Host " RDP READY"
+          Write-Host " Address : $env:TS_IP"
+          Write-Host " Username: $env:RDP_USER"
+          Write-Host " Password: $env:RDP_PASS"
+          Write-Host "=============================="

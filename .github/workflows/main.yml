@@ -1,69 +1,62 @@
-name: RDP
+name: RDP-Linux
 
 on:
   workflow_dispatch:
 
 jobs:
   secure-rdp:
-    runs-on: [self-hosted, windows]
+    runs-on: [self-hosted, linux]
     timeout-minutes: 0   # unlimited on self-hosted
 
     steps:
-      - name: Enable RDP and Firewall
-        shell: pwsh
+      - name: Install Desktop + xRDP
         run: |
-          Write-Host "Enabling Remote Desktop..."
+          sudo apt update
+          sudo apt install -y ubuntu-desktop xrdp curl
 
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
-            -Name "fDenyTSConnections" -Value 0
+          # Enable xRDP
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
 
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-
-          Restart-Service TermService -Force
-
-          Write-Host "RDP Enabled."
+          # Allow RDP port
+          sudo ufw allow 3389/tcp || true
 
       - name: Create RDP User
-        shell: pwsh
         run: |
-          $password = -join ((33..126) | Get-Random -Count 16 | ForEach-Object {[char]$_})
-          $secure = ConvertTo-SecureString $password -AsPlainText -Force
+          USER="rdp"
+          PASS=$(tr -dc 'A-Za-z0-9!@#$%&' </dev/urandom | head -c 16)
 
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $secure
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-            Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          }
+          if ! id "$USER" &>/dev/null; then
+            sudo useradd -m -s /bin/bash $USER
+            echo "$USER:$PASS" | sudo chpasswd
+            sudo usermod -aG sudo $USER
+          fi
 
-          echo "RDP_USER=RDP" >> $env:GITHUB_ENV
-          echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+          echo "RDP_USER=$USER" >> $GITHUB_ENV
+          echo "RDP_PASS=$PASS" >> $GITHUB_ENV
 
       - name: Install Tailscale
-        shell: pwsh
         run: |
-          $url="https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $out="$env:TEMP\tailscale.msi"
-          Invoke-WebRequest $url -OutFile $out
-          Start-Process msiexec.exe -ArgumentList "/i `"$out`" /quiet /norestart" -Wait
+          curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Connect Tailscale
-        shell: pwsh
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname=rdp-$env:COMPUTERNAME
+          sudo tailscale up \
+            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} \
+            --hostname=rdp-linux-$(hostname)
 
-          Start-Sleep 5
-          $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+          sleep 5
+          IP=$(tailscale ip -4)
+          echo "TS_IP=$IP" >> $GITHUB_ENV
 
       - name: Show Connection Info
-        shell: pwsh
         run: |
-          Write-Host ""
-          Write-Host "=============================="
-          Write-Host " RDP READY"
-          Write-Host " Address : $env:TS_IP"
-          Write-Host " Username: $env:RDP_USER"
-          Write-Host " Password: $env:RDP_PASS"
-          Write-Host "=============================="
+          echo ""
+          echo "=============================="
+          echo "   LINUX RDP READY"
+          echo "=============================="
+          echo "Address : $TS_IP"
+          echo "Port    : 3389"
+          echo "Username: $RDP_USER"
+          echo "Password: $RDP_PASS"
+          echo "=============================="
